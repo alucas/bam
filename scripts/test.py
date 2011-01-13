@@ -6,6 +6,7 @@ extra_bam_flags = ""
 src_path = "tests"
 output_path = "test_output"
 
+in_unittest_bloc = 0
 failed_tests = []
 
 tests = []
@@ -118,99 +119,181 @@ def difftest(name, flags1, flags2):
 	else:
 		print "ok"
 
+class Test:
+	def __init__(self):
+		self.line = ""
+		self.catch = None
+		self.find = None
+		self.err = 0 # expect 0 per default
+
+        def is_wrong_error_code(self, code):
+        	return self.err != code
+
+        def is_catch_enable(self):
+        	return self.catch != None
+
+        def is_catch_equal(self, catch):
+        	return self.catch == catch
+
+        def is_find_enable(self):
+        	return self.find != None
+
+        def is_find_in_line(self, line):
+                return self.find in line
+        
 def unittests():
 	global failed_tests
-	class Test:
-		def __init__(self):
-			self.line = ""
-			self.catch = None
-			self.find = None
-			self.err = 0 # expect 0 per default
-	
-	tests = []
-	state = 0
-	for line in file('src/base.lua'):
-		if state == 0:
-			if "@UNITTESTS" in line:
-				state = 1
-		else:
-			if "@END" in line:
-				state = 0
-			else:
-				test = Test()
-				(args, cmdline) = line.split(":", 1)
-				test.line = cmdline.strip()
-				args = args.split(";")
-				for arg in args:
-					arg,value = arg.split("=")
-					arg = arg.strip()
-					value = value.strip()
-					if arg.lower() == "err":
-						test.err = int(value)
-					elif arg.lower() == "catch":
-						test.catch = value[1:-1]
-					elif arg.lower() == "find":
-						test.find = value[1:-1]
-				tests += [test]
+        
+        baseFile = file('src/base.lua')
+	tests = get_unittests_from_file(baseFile)
+        baseFile.close()
 	
 	olddir = os.getcwd()
 	os.chdir(output_path+"/unit")
 	
 	for test in tests:
-		f = file("bam.lua", "w")
-		if test.catch != None:
-			print >>f, "print(\"CATCH:\", %s)"%(test.line)
-		else:
-			print >>f, test.line
-		print >>f, 'DefaultTarget(PseudoTarget("Test"))'
-		f.close()
+                make_bam_file(test)
 
 		print  "%s:"%(test.line),
-		p = subprocess.Popen(bam + " --dry", stdout=subprocess.PIPE, shell=True, stderr=subprocess.STDOUT)
-		report = p.stdout.readlines()
-		p.wait()
-		ret = p.returncode
+
+                return_code, report_lines = run_bam_on_unittest()
 		
 		failed = False
-		if ret != test.err:
-			failed = True
-			print "FAILED! error %d != %d" % (test.err, ret)
+                test_succeeded, error_string = error_code_test(test, return_code)
+                if not test_succeeded:
+                        failed = True
+                        print error_string
+
 		
-		if test.catch != None:
-			found = False
-			for l in report:
-				l = l.split("CATCH:", 1)
-				if len(l) == 2:
-					catched = l[1].strip()
-					if catched == test.catch:
-						found = True
-					else:
-						print "FAILED! catch '%s' != '%s'" % (test.catch, catched)
-						
-			if not found:
-				failed = True
+		if test.is_catch_enable():
+                        test_succeeded, error_string = catch_test(test, report_lines)
+                        if not test_succeeded:
+                                failed = True
+                                print error_string
 		
-		if test.find != None:
-			found = False
-			for l in report:
-				if test.find in l:
-					found = True
-			
-			if not found:
-				failed = True
-				print "FAILED! could not find '%s' in output" % (test.find)
+		if test.is_find_enable():
+			test_succeeded, error_string = find_test(test, report_lines)
+                        if not test_succeeded:
+                                failed = True
+                                print error_string
+
 		if failed or verbose:
 			if failed:
 				failed_tests += [test.line]
 			else:
 				print "",
-			for l in report:
-				print "\t", l.rstrip()
+			for line in report_lines:
+				print "\t", line.rstrip()
 		else:
 			print "ok"
 			
 
 	os.chdir(olddir)
+
+def get_unittests_from_file(file):
+        tests = []
+	for line in file:
+                if is_not_in_unittest_bloc():
+			if is_start_unittest_line(line):
+                        	enable_unittest_bloc()
+		else:
+			if is_end_unittest_line(line):
+				disable_unittest_bloc()
+                        else:
+                                test = parse_unittest_line(line)
+                                tests += [test]
+	return tests
+
+def is_in_unittest_bloc():
+        global in_unittest_bloc
+	return in_unittest_bloc == 1
+
+def is_not_in_unittest_bloc():
+	return not is_in_unittest_bloc()
+
+def is_start_unittest_line(line):
+	return "@UNITTESTS" in line
+
+def is_end_unittest_line(line):
+	return "@END" in line
+
+def enable_unittest_bloc():
+        global in_unittest_bloc
+        in_unittest_bloc = 1
+
+def disable_unittest_bloc():
+        global in_unittest_bloc
+        in_unittest_bloc = 0
+
+def parse_unittest_line(line):
+        test = Test()
+        args, cmdline = line.split(":", 1)
+        test.line = cmdline.strip()
+        args = args.split(";")
+        for arg in args:
+                arg,value = arg.split("=")
+                arg = arg.strip()
+                value = value.strip()
+                if arg.lower() == "err":
+                        test.err = int(value)
+                elif arg.lower() == "catch":
+                	test.catch = value[1:-1]
+                elif arg.lower() == "find":
+                	test.find = value[1:-1]
+        return test
+
+def make_bam_file(test):
+        f = file("bam.lua", "w")
+        if test.catch != None:
+                print >>f, "print(\"CATCH:\", %s)"%(test.line)
+	else:
+		print >>f, test.line
+
+        print >>f, 'DefaultTarget(PseudoTarget("Test"))'
+        f.close()
+
+def run_bam_on_unittest():
+        p = subprocess.Popen(
+                bam + " --dry",
+                stdout = subprocess.PIPE,
+                shell = True,
+                stderr = subprocess.STDOUT)
+	p.wait()
+
+        return p.returncode, p.stdout.readlines()
+
+def error_code_test(test, return_code):
+        if test.is_wrong_error_code(return_code):
+                return False, "FAILED! error %d != %d" % (test.err, return_code)
+
+        return True, ""
+
+def catch_test(test, lines):
+        found = False
+	for line in lines:
+		splited_line = line.split("CATCH:", 1)
+		if len(splited_line) == 2:
+			catched = splited_line[1].strip()
+			if test.is_catch_equal(catched):
+				found = True
+               		else:
+				error_string = "FAILED! catch '%s' != '%s'" % (test.catch, catched)
+
+	if not found:
+		return False, error_string
+
+        return True, ""
+
+def find_test(test, lines):
+        found = False
+        for line in lines:
+                if test.is_find_in_line(line):
+                        found = True
+
+		if not found:
+			return False, "FAILED! could not find '%s' in output" % (test.find)
+
+        return True, ""
 
 # clean
 shutil.rmtree(output_path, True)
